@@ -15,3 +15,8 @@ node_modules/
 # Игнорировать Python кеш
 __pycache__/
 *.pyc
+
+data
+venv
+vosk-model-small-ru-0.22
+vosk-model-small-en-us-0.15
