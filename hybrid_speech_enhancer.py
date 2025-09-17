@@ -176,7 +176,6 @@ class HybridSpeechEnhancer:
     def _vad_detection_webrtc(self, audio_frame):
         """Определяет наличие речи с помощью WebRTC VAD."""
         audio_int16 = (audio_frame * 32767).astype(np.int16)
-        frame_duration_ms = int(len(audio_frame) / self.sr * 1000)
         
         try:
             is_speech = self.vad.is_speech(audio_int16.tobytes(), self.sr)
@@ -271,19 +270,6 @@ class HybridSpeechEnhancer:
         stft_clean = output_real + 1j * output_imag
         return stft_clean
     
-    def _update_noise_estimate(self, stft_features, is_speech):
-        """Обновляет оценку шумового спектра."""
-        mag = np.abs(stft_features)
-        
-        if self.noise_estimate is None:
-            self.noise_estimate = mag
-            return
-        
-        # Адаптивная оценка шума (обновляем только в отсутствие речи)
-        if not is_speech or self.consecutive_speech_frames < 3:
-            alpha = 0.9  # Коэффициент сглаживания
-            self.noise_estimate = alpha * self.noise_estimate + (1 - alpha) * mag
-    
     def _hybrid_denoise(self, stft_features, is_speech):
         """Гибридное шумоподавление."""
         # 1. Обновляем оценку шума
@@ -293,7 +279,7 @@ class HybridSpeechEnhancer:
         stft_preprocessed = self._spectral_subtraction(stft_features)
         
         # 3. Нейросетевое шумоподавление
-        # stft_neural = self._neural_denoise(stft_preprocessed)
+        stft_neural = self._neural_denoise(stft_preprocessed)
         
         # 4. Фильтр Винера как постобработка
         stft_final = self._wiener_filter(stft_preprocessed)

@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 import webrtcvad
-from vad import Vad
 from hybrid_speech_enhancer import HybridSpeechEnhancer
 from translator import Translator
 from vosk import Model, KaldiRecognizer, SetLogLevel
