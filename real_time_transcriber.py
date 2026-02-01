@@ -109,11 +109,13 @@ class RealTimeTranscriber:
                     text = out.get("text", "")
                     if text:
                         print(f"[RESULT] {text}")
+                        # print(f"[TRANSLATION] {self.translator.translate(text)}", end="\r")
                 else:
                     pres = json.loads(self.rec.PartialResult())
                     partial = pres.get("partial", "")
                     if partial:
                         print(f"[PARTIAL] {partial}", end="\r")
+                        # print(f"[TRANSLATION] {self.translator.translate(partial)}", end="\r")
             else:
                 # Если PCM состоит из нулей, проверяем нужно ли финализировать результат
                 if last_speech_time is not None:
@@ -127,8 +129,8 @@ class RealTimeTranscriber:
 
     def start(self):
         SetLogLevel(0)
-        print("Запускаем прототип real-time субтитрирования...")
-        print("Нажми Ctrl+C для остановки\n")
+        print("Launching a prototype of real-time subtitling...")
+        print("Hit Ctrl+C to stop\n")
 
         try:
             with sd.InputStream(samplerate=self.sample_rate, channels=self.channels,

@@ -274,12 +274,13 @@ class HybridSpeechEnhancer:
         """Гибридное шумоподавление."""
         # 1. Обновляем оценку шума
         self._update_noise_estimate(stft_features, is_speech)
+        # 3. Нейросетевое шумоподавление
+        # stft_neural = self._neural_denoise(stft_preprocessed)
         
         # 2. Применяем спектральное вычитание как предобработку
         stft_preprocessed = self._spectral_subtraction(stft_features)
         
-        # 3. Нейросетевое шумоподавление
-        stft_neural = self._neural_denoise(stft_preprocessed)
+        
         
         # 4. Фильтр Винера как постобработка
         stft_final = self._wiener_filter(stft_preprocessed)
