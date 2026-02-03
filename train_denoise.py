@@ -71,7 +71,6 @@ def build_light_denoise_model(input_shape):
 
 def build_fast_denoise_model(input_shape):
     """С остаточными связями - лучше сохраняет голос"""
-    from tensorflow.keras import layers, models
     
     inputs = layers.Input(shape=input_shape)
     
@@ -90,7 +89,7 @@ def build_fast_denoise_model(input_shape):
     x = layers.Conv2D(32, (3, 3), padding='same')(x)
     x = layers.BatchNormalization()(x)
     x = layers.add([x, x_skip1])  # Добавляем оригинальный сигнал!
-    x = layers.ReLU()(x)§
+    x = layers.ReLU()(x)
     
     outputs = layers.Conv2D(2, (3, 3), activation='tanh', padding='same')(x)
     
@@ -344,7 +343,6 @@ def prepare_dataset_from_tuples(file_tuples, num_samples=10000, val_split=0.15):
 
 # === основной код ===
 if __name__ == "__main__":
-    # ... (инициализация как раньше)
     
     # Собираем файлы
     clean_files = glob.glob("data/clean_speech/*.wav")
