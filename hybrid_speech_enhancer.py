@@ -9,7 +9,7 @@ import webrtcvad
 from scipy import signal
 
 class HybridSpeechEnhancer:
-    def __init__(self, sr, n_fft=512, hop_length=256, win_length=480,
+    def __init__(self, sr, n_fft=512, hop_length=320, win_length=480,
                  frame_duration=0.02, vad_aggressiveness=3, online_learning=False):
         self.sr = sr
         self.n_fft = n_fft
@@ -32,6 +32,7 @@ class HybridSpeechEnhancer:
         self.noisy_buffer = deque(maxlen=1000)
         self.learning_interval = 50
         self.frame_counter = 0
+        self.context_frames = 5
         
         # Параметры гибридного подавления
         self.noise_estimate = None
@@ -47,7 +48,7 @@ class HybridSpeechEnhancer:
         self.denoise_model = self._build_denoise_model()
 
         try:
-            self.denoise_model.load_weights('denoise_model.weights.h5')
+            self.denoise_model.load_weights('2denoise_model.weights.h5')
         except:
             print("Предобученные веса не найдены. Инициализированы случайные веса.")
         
@@ -80,32 +81,16 @@ class HybridSpeechEnhancer:
     
     def _get_model_prediction(self, features):
         """Получает предсказание модели для features."""
-        # features shape: (freq, time, 2) или (freq, 2)
-        
-        # Сохраняем оригинальную форму
-        original_shape = features.shape
-        
-        # Преобразуем в 2D для нормализации
-        features_flat = features.reshape(-1, 2)
-        
-        # Нормализация по ВСЕМ данным
-        input_mean = np.mean(features_flat, axis=0, keepdims=True)  # (1, 2)
-        input_std = np.std(features_flat, axis=0, keepdims=True) + 1e-8
-        
-        features_normalized = (features_flat - input_mean) / input_std
-        features_normalized = features_normalized.reshape(original_shape)
+        # Нормализация
+        input_mean = np.mean(features, axis=0, keepdims=True)
+        input_std = np.std(features, axis=0, keepdims=True) + 1e-8
+        features_normalized = (features - input_mean) / input_std
         
         # Предсказание
-        prediction = self.denoise_model.predict(
-            features_normalized[np.newaxis, ...], verbose=0
-        )[0]
+        prediction = self.denoise_model.predict(features_normalized[np.newaxis, ...], verbose=0)[0]
         
         # Денормализация
-        prediction_flat = prediction.reshape(-1, 2)
-        prediction_denormalized = prediction_flat * input_std + input_mean
-        prediction_denormalized = prediction_denormalized.reshape(prediction.shape)
-        
-        return prediction_denormalized
+        return prediction * input_std + input_mean
     
     def _train_on_batch(self):
         """Обучает модель на накопленном батче."""
@@ -125,66 +110,31 @@ class HybridSpeechEnhancer:
         # Восстанавливаем learning rate
         tf.keras.backend.set_value(self.denoise_model.optimizer.lr, original_lr)
     
-    def _create_context_windows(self, spec):
-        """Создает контекстные окна из спектрограммы."""
-        # spec shape: (freq, time, 2)
-        time_frames = spec.shape[1]
-        
-        windows = []
-        for t in range(time_frames - self.context_frames + 1):
-            window = spec[:, t:t+self.context_frames, :]
-            windows.append(window)
-        
-        return np.array(windows)
-    
     def _safe_online_learning_step(self, stft_features, is_speech):
-        """Безопасный шаг онлайн-обучения с контекстными окнами."""
+        """Безопасный шаг онлайн-обучения с проверками."""
         if not self.online_learning:
             return
             
         if not self._should_learn(stft_features, is_speech):
             return
+            
+        # Только для высококачественных речевых фреймов
+        real_part = np.real(stft_features)
+        imag_part = np.imag(stft_features)
+        noisy_features = np.stack([real_part[:, 0], imag_part[:, 0]], axis=-1)
         
-        # 1. Создаем полные спектрограммы (real и imag)
-        real_part = np.real(stft_features)  # (freq, time)
-        imag_part = np.imag(stft_features)  # (freq, time)
+        # Используем текущую модель для получения "чистого" сигнала
+        # Это безопаснее, чем _estimate_clean_signal
+        clean_features = self._get_model_prediction(noisy_features)
         
-        # Объединяем все временные кадры
-        noisy_full = np.stack([real_part, imag_part], axis=-1)  # (freq, time, 2)
+        # Добавляем в буфер
+        self.noisy_buffer.append(noisy_features)
+        self.clean_buffer.append(clean_features)
         
-        # 2. Создаем контекстные окна (как при обучении!)
-        noisy_windows = self._create_context_windows(noisy_full)
-        
-        # 3. Получаем предсказания для ВСЕХ окон
-        clean_predictions = []
-        for window in noisy_windows:
-            pred = self._get_model_prediction(window)  # Должен обрабатывать (freq, 5, 2)
-            clean_predictions.append(pred)
-        
-        clean_predictions = np.array(clean_predictions)  # (num_windows, freq, 2)
-        
-        # 4. Создаем "чистые" окна (вставляем предсказания в середину)
-        clean_windows = []
-        center_idx = self.context_frames // 2
-        
-        for pred in clean_predictions:
-            # Создаем окно с нулями, вставляем предсказание в центр
-            window = np.zeros((self.n_fft//2 + 1, self.context_frames, 2))
-            window[:, center_idx, :] = pred
-            clean_windows.append(window)
-        
-        clean_windows = np.array(clean_windows)
-        
-        # 5. Добавляем в буфер пары (noisy_window, clean_window)
-        for noisy_win, clean_win in zip(noisy_windows, clean_windows):
-            self.noisy_buffer.append(noisy_win)
-            self.clean_buffer.append(clean_win)
-        
-        # 6. Обучаем при накоплении
+        # Обучаем только если накопилось достаточно качественных примеров
         if len(self.clean_buffer) >= 32:
             self._train_on_batch()
             self.learning_epoch_counter += 1
-            print(f"✅ Онлайн-обучение шаг {self.learning_epoch_counter}")
 
     def _should_learn(self, stft_features, is_speech):
         """Определяет, безопасно ли проводить онлайн-обучение."""
@@ -201,57 +151,45 @@ class HybridSpeechEnhancer:
         return (snr > self.min_snr_for_learning and 
                 confidence > self.learning_confidence_threshold and
                 self.learning_epoch_counter < self.max_learning_epochs)
-            
+        
     def _build_denoise_model(self):
-        freq_bins = self.n_fft // 2 + 1
-        input_shape = (freq_bins, self.context_frames, 2)
+        inputs = layers.Input(shape=(self.n_fft//2 + 1, 1, 2))
         
-        inputs = layers.Input(shape=input_shape)
-        input_center = layers.Lambda(lambda x: x[:, :, self.context_frames//2, :])(inputs)
-        
-        # Encoder
-        x = layers.Conv2D(32, (3, 3), padding='same')(inputs)
+        # Основной путь обработки
+        x = layers.Conv2D(32, (5, 1), padding='same', activation='relu')(inputs)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
-        skip1 = x
+        x = layers.Dropout(0.1)(x)
         
-        x = layers.Conv2D(64, (3, 3), padding='same')(x)
+        x = layers.Conv2D(64, (5, 1), padding='same', activation='relu')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
-        skip2 = x
         
-        x = layers.Conv2D(128, (3, 3), padding='same')(x)
+        # Механизм внимания (channel attention)
+        attention = layers.GlobalAveragePooling2D()(x)
+        attention = layers.Dense(32, activation='relu')(attention)
+        attention = layers.Dense(64, activation='sigmoid')(attention)
+        attention = layers.Reshape((1, 1, 64))(attention)
+        
+        # Применяем внимание
+        x = layers.Multiply()([x, attention])
+        
+        # Продолжаем обработку
+        x = layers.Conv2D(64, (3, 1), padding='same', activation='relu')(x)
         x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
+        x = layers.Dropout(0.1)(x)
         
-        # Bottleneck
-        x = layers.Conv2D(128, (3, 3), padding='same')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
+        # Frequency attention
+        freq_attention = layers.Conv2D(1, (1, 1), padding='same', activation='sigmoid')(x)
+        x = layers.Multiply()([x, freq_attention])
         
-        # Decoder
-        x = layers.Conv2D(64, (3, 3), padding='same')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
-        x = layers.Add()([x, skip2])
+        # Выходной слой
+        x = layers.Conv2D(32, (3, 1), padding='same', activation='relu')(x)
+        outputs = layers.Conv2D(2, (3, 1), padding='same', activation='tanh')(x)
         
-        x = layers.Conv2D(32, (3, 3), padding='same')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
-        x = layers.Add()([x, skip1])
+        outputs = layers.Lambda(lambda x: tf.squeeze(x, axis=2))(outputs)
         
-        # Output
-        x = layers.Lambda(lambda x: x[:, :, self.context_frames//2, :])(x)
-        x = layers.Conv1D(32, 3, padding='same')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(alpha=0.1)(x)
+        model = models.Model(inputs=inputs, outputs=outputs)
+        return model
         
-        outputs = layers.Conv1D(2, 3, padding='same')(x)
-        outputs = layers.Add()([input_center, outputs])
-        outputs = layers.Activation('tanh')(outputs)
-        
-        return models.Model(inputs, outputs)
-    
     def _vad_detection_webrtc(self, audio_frame):
         """Определяет наличие речи с помощью WebRTC VAD."""
         audio_int16 = (audio_frame * 32767).astype(np.int16)
@@ -322,73 +260,41 @@ class HybridSpeechEnhancer:
         return mag_clean * np.exp(1j * phase)
     
     def _neural_denoise(self, stft_features):
-        """Оффлайн версия - использует будущие кадры."""
         real_part = np.real(stft_features)
         imag_part = np.imag(stft_features)
-        full_features = np.stack([real_part, imag_part], axis=-1)
         
-        # Создаем все возможные окна
-        time_frames = full_features.shape[1]
-        windows = []
-        window_indices = []
-        
-        for t in range(time_frames - self.context_frames + 1):
-            window = full_features[:, t:t+self.context_frames, :]
-            windows.append(window)
-            window_indices.append(t + self.context_frames//2)  # Центральный индекс
-        
-        windows = np.array(windows)  # (num_windows, freq, context_frames, 2)
-        
-        # Обрабатываем батчами для скорости
-        batch_size = 32
-        predictions = []
-        
-        for i in range(0, len(windows), batch_size):
-            batch = windows[i:i+batch_size]
-            batch_pred = self.denoise_model.predict(batch, verbose=0)
-            predictions.append(batch_pred)
-        
-        predictions = np.concatenate(predictions, axis=0)  # (num_windows, freq, 2)
-        
-        # Собираем обратно в полную спектрограмму
+        # Для каждого кадра отдельно
+        num_frames = real_part.shape[1]
         output_real = np.zeros_like(real_part)
         output_imag = np.zeros_like(imag_part)
         
-        # Для граничных кадров используем взвешенное усреднение
-        weights = np.zeros(time_frames)
+        for t in range(num_frames):
+            input_frame = np.stack([real_part[:, t], imag_part[:, t]], axis=-1)
+            input_expanded = input_frame[np.newaxis, :, np.newaxis, :]  # (1, freq, 1, 2)
+            
+            # Предсказание
+            output_frame = self.denoise_model.predict(input_expanded, verbose=0)[0]
+            
+            output_real[:, t] = output_frame[:, 0]
+            output_imag[:, t] = output_frame[:, 1]
         
-        for pred, center_idx in zip(predictions, window_indices):
-            output_real[:, center_idx] += pred[:, 0]
-            output_imag[:, center_idx] += pred[:, 1]
-            weights[center_idx] += 1
-        
-        # Нормализуем (делим на количество вкладов)
-        weights[weights == 0] = 1  # избегаем деления на 0
-        output_real = output_real / weights[np.newaxis, :]
-        output_imag = output_imag / weights[np.newaxis, :]
-        
-        # Для первых и последних кадров (где нет полного контекста)
-        # можно использовать экстраполяцию или просто копировать оригинал
-        
-        stft_clean = output_real + 1j * output_imag
-        return stft_clean
+        return output_real + 1j * output_imag
     
     def _hybrid_denoise(self, stft_features, is_speech):
         """Гибридное шумоподавление."""
         # 1. Обновляем оценку шума
         self._update_noise_estimate(stft_features, is_speech)
         # 3. Нейросетевое шумоподавление
-        stft_neural = self._neural_denoise(stft_features)
+        
         
         # 2. Применяем спектральное вычитание как предобработку
-        # stft_preprocessed = self._spectral_subtraction(stft_features)
-        
-        
+        stft_preprocessed = self._spectral_subtraction(stft_features)
+        stft_neural = self._neural_denoise(stft_preprocessed)
         
         # 4. Фильтр Винера как постобработка
-        # stft_final = self._wiener_filter(stft_preprocessed)
+        stft_final = self._wiener_filter(stft_neural)
         
-        return stft_neural
+        return stft_final
     
     def _estimate_clean_signal(self, noisy_stft):
         """Оценивает чистый сигнал для обучения."""
